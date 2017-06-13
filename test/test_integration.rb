@@ -41,10 +41,7 @@ class TestIntegration < Minitest::Test
   end
 
   def server(argv)
-    # when we were started with bundler all load-paths and bin-paths are setup correctly
-    # this is what 9X% of users run, so it is what we should test
-    # the other case is solely for package builders or testing 1-off cases where the system puma is used
-    base = (defined?(Bundler) ? "bundle exec puma" : "#{Gem.ruby} -Ilib bin/puma")
+    base = "#{Gem.ruby} -Ilib bin/puma"
     cmd = "#{base} -b tcp://127.0.0.1:#{@tcp_port} #{argv}"
     @server = IO.popen(cmd, "r")
 
@@ -86,7 +83,12 @@ class TestIntegration < Minitest::Test
   end
 
   def wait_for_server_to_boot
-    true while @server.gets !~ /Ctrl-C/ # wait for server to say it booted
+    retries = 0
+    while retries < 30
+      break if @server.gets =~ /Ctrl-C/ # wait for server to say it booted
+      retries += 1
+      sleep 1
+    end
   end
 
   def read_body(connection)
