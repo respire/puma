@@ -52,6 +52,7 @@ module Puma
       @events = events
 
       @check, @notify = Puma::Util.pipe
+      @mutex = Mutex.new # guard pipe
 
       @status = :stop
 
@@ -177,8 +178,10 @@ module Puma
         begin
           @app.call env, client.to_io
         rescue Object => e
-          STDERR.puts "! Detected exception at toplevel: #{e.message} (#{e.class})"
-          STDERR.puts e.backtrace
+          unless STDERR.closed? || STDERR.fileno < 0
+            STDERR.puts "! Detected exception at toplevel: #{e.message} (#{e.class})"
+            STDERR.puts e.backtrace
+          end
         end
 
         client.close unless env['detach']
@@ -230,11 +233,12 @@ module Puma
         graceful_shutdown if @status == :stop || @status == :restart
 
       rescue Exception => e
-        STDERR.puts "Exception handling servers: #{e.message} (#{e.class})"
-        STDERR.puts e.backtrace
+        unless STDERR.closed? || STDERR.fileno < 0
+          STDERR.puts "Exception handling servers: #{e.message} (#{e.class})"
+          STDERR.puts e.backtrace
+        end
       ensure
-        @check.close
-        @notify.close
+        close_pipe
 
         if @status != :restart and @own_binder
           @binder.close
@@ -328,6 +332,25 @@ module Puma
       end
     end
 
+    def pipe_closed?
+      @mutex.synchronize do
+        @notify.closed? || @notify.fileno < 0 || @check.closed? || @check.fileno < 0
+      end
+    end
+    private :pipe_closed?
+
+    def close_pipe
+      @mutex.synchronize do
+        begin
+          @notify.close unless @notify.closed? || @notify.fileno < 0
+          @check.close unless @check.closed? || @check.fileno < 0
+        rescue IOError
+          retry
+        end
+      end
+    end
+    private :close_pipe
+
     def handle_servers
       begin
         check = @check
@@ -385,11 +408,12 @@ module Puma
           @reactor.shutdown
         end
       rescue Exception => e
-        STDERR.puts "Exception handling servers: #{e.message} (#{e.class})"
-        STDERR.puts e.backtrace
+        unless STDERR.closed? || STDERR.fileno < 0
+          STDERR.puts "Exception handling servers: #{e.message} (#{e.class})"
+          STDERR.puts e.backtrace
+        end
       ensure
-        @check.close
-        @notify.close
+        close_pipe
 
         if @status != :restart and @own_binder
           @binder.close
@@ -895,32 +919,30 @@ module Puma
     # Stops the acceptor thread and then causes the worker threads to finish
     # off the request queue before finally exiting.
     #
-    def stop(sync=false)
-      begin
-        @notify << STOP_COMMAND
-      rescue IOError
-        # The server, in another thread, is shutting down
+
+    def thread_safe_notify(cmd)
+      @mutex.synchronize do
+        begin
+          @notify << cmd unless @notify.closed? || @notify.fileno < 0 || @check.closed? || @check.fileno < 0
+        rescue IOError
+        end
       end
+    end
+
+    def stop(sync=false)
+      Thread.new { thread_safe_notify(STOP_COMMAND) }.join
 
       @thread.join if @thread && sync
     end
 
     def halt(sync=false)
-      begin
-        @notify << HALT_COMMAND
-      rescue IOError
-        # The server, in another thread, is shutting down
-      end
+      Thread.new { thread_safe_notify(HALT_COMMAND) }.join
 
       @thread.join if @thread && sync
     end
 
     def begin_restart
-      begin
-        @notify << RESTART_COMMAND
-      rescue IOError
-        # The server, in another thread, is shutting down
-      end
+      Thread.new { thread_safe_notify(RESTART_COMMAND) }.join
     end
 
     def fast_write(io, str)

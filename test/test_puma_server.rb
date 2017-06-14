@@ -29,9 +29,12 @@ class TestPumaServer < Minitest::Test
 
   def test_proper_stringio_body
     data = nil
+    mutex = Mutex.new
 
     @server.app = proc do |env|
-      data = env['rack.input'].read
+      mutex.synchronize do
+        data = env['rack.input'].read
+      end
       [200, {}, ["ok"]]
     end
 
@@ -47,7 +50,20 @@ class TestPumaServer < Minitest::Test
 
     sock.read
 
-    assert_equal "#{fifteen}#{fifteen}", data
+    retries = 0
+    pass = false
+    while !pass && retries < 5
+      sleep 1
+      mutex.synchronize do
+        if !data.nil?
+          assert_equal "#{fifteen}#{fifteen}", data
+          pass = true
+        else
+          retries += 1
+        end
+      end
+    end
+    assert pass, 'test timeout!'
   end
 
   def test_puma_socket

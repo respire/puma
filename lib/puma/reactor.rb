@@ -12,6 +12,7 @@ module Puma
 
       @mutex = Mutex.new
       @ready, @trigger = Puma::Util.pipe
+      @mutex_for_pipe = Mutex.new # Guard pipe
       @input = []
       @sleep_for = DefaultSleepFor
       @timeouts = []
@@ -21,18 +22,41 @@ module Puma
 
     private
 
+    def pipe_closed?
+      @mutex_for_pipe.synchronize do
+        @trigger.closed? || @trigger.fileno < 0 || @ready.closed? || @ready.fileno < 0
+      end
+    end
+
+    def close_pipe
+      @mutex_for_pipe.synchronize do
+        begin
+          @trigger.close unless @trigger.closed? || @trigger.fileno < 0
+          @ready.close unless @ready.closed? || @ready.fileno < 0
+        rescue IOError
+          retry
+        end
+      end
+    end
+
     def run_internal
       sockets = @sockets
 
       while true
+        return if pipe_closed?
+
         begin
           ready = IO.select sockets, nil, nil, @sleep_for
         rescue IOError => e
-          if sockets.any? { |socket| socket.closed? }
-            STDERR.puts "Error in select: #{e.message} (#{e.class})"
-            STDERR.puts e.backtrace
+          if sockets.any? { |socket| socket.closed? && socket != @ready }
+            unless STDERR.closed? || STDERR.fileno < 0
+              STDERR.puts "Error in select: #{e.message} (#{e.class})"
+              STDERR.puts e.backtrace
+            end
             sockets = sockets.reject { |socket| socket.closed? }
             retry
+          elsif pipe_closed?
+            return
           else
             raise
           end
@@ -143,8 +167,7 @@ module Puma
     def run
       run_internal
     ensure
-      @trigger.close
-      @ready.close
+      close_pipe
     end
 
     def run_in_thread
@@ -152,12 +175,13 @@ module Puma
         begin
           run_internal
         rescue StandardError => e
-          STDERR.puts "Error in reactor loop escaped: #{e.message} (#{e.class})"
-          STDERR.puts e.backtrace
-          retry
+          unless STDERR.closed? || STDERR.fileno < 0
+            STDERR.puts "Error in reactor loop escaped: #{e.message} (#{e.class})"
+            STDERR.puts e.backtrace
+          end
+          retry unless pipe_closed?
         ensure
-          @trigger.close
-          @ready.close
+          close_pipe
         end
       end
     end
@@ -190,19 +214,22 @@ module Puma
       end
     end
 
-    # Close all watched sockets and clear them from being watched
-    def clear!
-      begin
-        @trigger << "c"
-      rescue IOError
+    def thread_safe_trigger(cmd)
+      @mutex_for_pipe.synchronize do
+        begin
+          @trigger << cmd unless @trigger.closed? || @trigger.fileno < 0 || @ready.closed? || @ready.fileno < 0
+        rescue IOError
+        end
       end
     end
 
+    # Close all watched sockets and clear them from being watched
+    def clear!
+      Thread.new { thread_safe_trigger 'c' }.join
+    end
+
     def shutdown
-      begin
-        @trigger << "!"
-      rescue IOError
-      end
+      Thread.new { thread_safe_trigger '!' }.join
 
       @thread.join
     end
