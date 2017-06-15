@@ -21,18 +21,52 @@ module Puma
 
     private
 
+    def trigger_closed?
+      @trigger.closed? || @trigger.fileno < 0
+    end
+    private :trigger_closed?
+
+    def ready_closed?
+      @ready.closed? || @ready.fileno < 0
+    end
+    private :ready_closed?
+
+    def pipe_closed?
+      trigger_closed? || ready_closed?
+    end
+    private :pipe_closed?
+
+    def close_pipe
+      @trigger.close unless trigger_closed?
+      @ready.close unless ready_closed?
+    rescue IOError
+      retry
+    end
+    private :close_pipe
+
+    def puts_stderr(message)
+      return if STDERR.closed? || STDERR.fileno < 0
+      STDERR.puts message
+    rescue IOError
+    end
+    private :puts_stderr
+
     def run_internal
       sockets = @sockets
 
       while true
+        return if pipe_closed?
+
         begin
           ready = IO.select sockets, nil, nil, @sleep_for
         rescue IOError => e
-          if sockets.any? { |socket| socket.closed? }
-            STDERR.puts "Error in select: #{e.message} (#{e.class})"
-            STDERR.puts e.backtrace
+          if sockets.any? { |socket| socket != @ready && socket.closed? }
+            puts_stderr "Error in select: #{e.message} (#{e.class})"
+            puts_stderr e.backtrace
             sockets = sockets.reject { |socket| socket.closed? }
             retry
+          elsif pipe_closed?
+            return
           else
             raise
           end
@@ -143,8 +177,7 @@ module Puma
     def run
       run_internal
     ensure
-      @trigger.close
-      @ready.close
+      close_pipe
     end
 
     def run_in_thread
@@ -152,12 +185,11 @@ module Puma
         begin
           run_internal
         rescue StandardError => e
-          STDERR.puts "Error in reactor loop escaped: #{e.message} (#{e.class})"
-          STDERR.puts e.backtrace
-          retry
+          puts_stderr "Error in reactor loop escaped: #{e.message} (#{e.class})"
+          puts_stderr e.backtrace
+          retry unless pipe_closed?
         ensure
-          @trigger.close
-          @ready.close
+          close_pipe
         end
       end
     end
@@ -176,10 +208,18 @@ module Puma
       end
     end
 
+    def write_trigger(cmd)
+      return false if pipe_closed?
+      @trigger << cmd
+      true
+    rescue IOError
+      false
+    end
+
     def add(c)
       @mutex.synchronize do
         @input << c
-        @trigger << "*"
+        return unless write_trigger('*')
 
         if c.timeout_at
           @timeouts << c
@@ -192,17 +232,11 @@ module Puma
 
     # Close all watched sockets and clear them from being watched
     def clear!
-      begin
-        @trigger << "c"
-      rescue IOError
-      end
+      write_trigger 'c'
     end
 
     def shutdown
-      begin
-        @trigger << "!"
-      rescue IOError
-      end
+      write_trigger '!'
 
       @thread.join
     end

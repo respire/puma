@@ -96,6 +96,14 @@ module Puma
         @socket.flush
       end
 
+      def closed?
+        @socket.closed?
+      end
+
+      def fileno
+        @socket.fileno
+      end
+
       def close
         begin
           # Try to setup (so that we can then close them) any
@@ -226,6 +234,14 @@ module Puma
         engine = Engine.server @ctx
 
         Socket.new io, engine
+      end
+
+      def closed?
+        @socket.closed?
+      end
+
+      def fileno
+        @socket.fileno
       end
 
       def close

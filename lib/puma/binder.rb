@@ -46,9 +46,20 @@ module Puma
       @envs.fetch(sock, @proto_env)
     end
 
+    def safe_close_io(io)
+      return if io.closed? || io.fileno < 0
+      io.close
+    rescue IOError
+      retry
+    end
+    private :safe_close_io
+
     def close
-      @ios.each { |i| i.close }
-      @unix_paths.each { |i| File.unlink i }
+      @ios.each { |i| safe_close_io(i) }
+      @unix_paths.each do |i|
+        next unless File.exist?(i)
+        File.unlink i
+      end
     end
 
     def import_from_env

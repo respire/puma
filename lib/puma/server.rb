@@ -230,11 +230,10 @@ module Puma
         graceful_shutdown if @status == :stop || @status == :restart
 
       rescue Exception => e
-        STDERR.puts "Exception handling servers: #{e.message} (#{e.class})"
-        STDERR.puts e.backtrace
+        puts_stderr "Exception handling servers: #{e.message} (#{e.class})"
+        puts_stderr e.backtrace
       ensure
-        @check.close
-        @notify.close
+        close_pipe
 
         if @status != :restart and @own_binder
           @binder.close
@@ -328,6 +327,36 @@ module Puma
       end
     end
 
+    def notify_closed?
+      @notify.closed? || @notify.fileno < 0
+    end
+    private :notify_closed?
+
+    def check_closed?
+      @check.closed? || @check.fileno < 0
+    end
+    private :check_closed?
+
+    def pipe_closed?
+      notify_closed? || check_closed?
+    end
+    private :pipe_closed?
+
+    def close_pipe
+      @notify.close unless notify_closed?
+      @check.close unless check_closed?
+    rescue IOError
+      retry
+    end
+    private :close_pipe
+
+    def puts_stderr(message)
+      return if STDERR.closed? || STDERR.fileno < 0
+      STDERR.puts message
+    rescue IOError
+    end
+    private :puts_stderr
+
     def handle_servers
       begin
         check = @check
@@ -385,11 +414,10 @@ module Puma
           @reactor.shutdown
         end
       rescue Exception => e
-        STDERR.puts "Exception handling servers: #{e.message} (#{e.class})"
-        STDERR.puts e.backtrace
+        puts_stderr "Exception handling servers: #{e.message} (#{e.class})"
+        puts_stderr e.backtrace
       ensure
-        @check.close
-        @notify.close
+        close_pipe
 
         if @status != :restart and @own_binder
           @binder.close
@@ -892,35 +920,29 @@ module Puma
       end
     end
 
+    def write_notify(cmd)
+      @notify << cmd unless pipe_closed?
+    rescue IOError
+    end
+    private :write_notify
+
     # Stops the acceptor thread and then causes the worker threads to finish
     # off the request queue before finally exiting.
     #
     def stop(sync=false)
-      begin
-        @notify << STOP_COMMAND
-      rescue IOError
-        # The server, in another thread, is shutting down
-      end
+      write_notify STOP_COMMAND
 
       @thread.join if @thread && sync
     end
 
     def halt(sync=false)
-      begin
-        @notify << HALT_COMMAND
-      rescue IOError
-        # The server, in another thread, is shutting down
-      end
+      write_notify HALT_COMMAND
 
       @thread.join if @thread && sync
     end
 
     def begin_restart
-      begin
-        @notify << RESTART_COMMAND
-      rescue IOError
-        # The server, in another thread, is shutting down
-      end
+      write_notify RESTART_COMMAND
     end
 
     def fast_write(io, str)
